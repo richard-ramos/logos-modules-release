@@ -45,7 +45,7 @@ pipeline {
     )
     booleanParam(
       name: 'PUBLISH',
-      description: 'Publish GitHub releases and rebuild the catalog index.',
+      description: 'Publish GitHub releases. The catalog index is rebuilt by the rebuild-index GitHub workflow on each published release.',
       defaultValue: utils.isReleaseBuild() || (params.PUBLISH ?: false)
     )
     string(
@@ -80,16 +80,12 @@ pipeline {
             usernameVariable: 'GITHUB_USER',
             passwordVariable: 'GH_TOKEN',
           )]) {
-            toBuild = requested.findAll { m ->
-              def rc = nix.develop(
-                keepEnv: ['GH_TOKEN', 'GH_REPO'],
-                returnStatus: true,
-                "scripts/check-published.sh ${m}"
-              )
-              if (rc == 2) { error("Publish check errored for ${m} - aborting rather than rebuilding everything") }
-              if (rc == 0) { echo "SKIP ${m} - already published" }
-              return rc != 0
-            }
+            def output = nix.develop(
+              keepEnv: ['GH_TOKEN', 'GH_REPO'],
+              returnStdout: true,
+              "scripts/check-published.sh ${requested.join(' ')}"
+            )
+            toBuild = output.trim() ? output.trim().split('\n') as List : []
           }
         }
 
@@ -180,38 +176,11 @@ pipeline {
         }
       } }
     }
-
-    stage('Rebuild Index') {
-      when { anyOf {
-        expression { hasModules() }
-        expression { params.PUBLISH }
-      } }
-      steps { script {
-        def status = nix.develop(
-          keepEnv: ['GH_REPO'],
-          returnStatus: true,
-          'scripts/rebuild-index.sh released index.json'
-        )
-        if (status != 0) { error('Index rebuild failed') }
-        if (params.PUBLISH && fileExists('index.json') && hasModules()) {
-          github.upsertRelease(
-            user:    env.GH_USER,
-            repo:    env.GH_NAME,
-            version: 'index',
-            desc:    'Rolling catalog index. Do not delete.',
-            files:   findFiles(glob: 'index.json'),
-          )
-          echo 'Index published'
-        } else if (fileExists('index.json')) {
-          echo 'DRY RUN - index.json archived for inspection, NOT uploaded'
-        }
-      } }
-    }
   }
 
   post {
     always { script {
-      archiveArtifacts(artifacts: 'released/**, index.json, pkg/report__*', allowEmptyArchive: true)
+      archiveArtifacts(artifacts: 'released/**, pkg/report__*', allowEmptyArchive: true)
       if (urls) { jenkins.setBuildDesc(urls) }
     } }
     cleanup {
